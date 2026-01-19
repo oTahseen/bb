@@ -18,11 +18,15 @@ RUN git clone https://github.com/TelegramMessenger/MTProxy.git
 
 WORKDIR /opt/MTProxy
 
-# Build
+# Build MTProxy
 RUN make
 
-# Expose internal port
+# Create required config files
+RUN echo "$SECRET" > proxy-secret && \
+    echo "secret $(cat proxy-secret)" > proxy-multi.conf
+
+# Expose internal MTProxy port
 EXPOSE 3128
 
-# Run MTProxy (NO SPONSOR)
+# Start MTProxy
 CMD ["sh", "-c", "./objs/bin/mtproto-proxy -H 3128 -S $SECRET --aes-pwd proxy-secret proxy-multi.conf"]
