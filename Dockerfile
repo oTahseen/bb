@@ -21,11 +21,11 @@ WORKDIR /opt/MTProxy
 # Build MTProxy
 RUN make
 
-# Create required config files
+# Create required config files with CORRECT SYNTAX
 RUN echo "$SECRET" > proxy-secret && \
-    echo "secret $(cat proxy-secret)" > proxy-multi.conf
+    printf "proxy 0.0.0.0:3128 {\n  secret %s;\n}\n" "$SECRET" > proxy-multi.conf
 
-# Expose internal MTProxy port
+# Expose internal port
 EXPOSE 3128
 
 # Start MTProxy
