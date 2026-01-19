@@ -21,11 +21,11 @@ WORKDIR /opt/MTProxy
 # Build MTProxy
 RUN make
 
-# Required files
+# Required runtime files
 RUN echo "$SECRET" > proxy-secret
 RUN echo "proxy 0.0.0.0:3128;" > proxy.conf
 
 EXPOSE 3128
 
-# IMPORTANT: config file MUST be last argument
-CMD ["sh", "-c", "./objs/bin/mtproto-proxy -H 3128 -S $SECRET --aes-pwd proxy-secret proxy.conf"]
+# IMPORTANT: limit connections to avoid rlimit failure on Koyeb
+CMD ["sh", "-c", "./objs/bin/mtproto-proxy -H 3128 -S $SECRET --aes-pwd proxy-secret -c 1024 proxy.conf"]
