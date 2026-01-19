@@ -18,14 +18,13 @@ RUN git clone https://github.com/TelegramMessenger/MTProxy.git
 
 WORKDIR /opt/MTProxy
 
-# Build MTProxy
+# Build
 RUN make
 
-# Required runtime files
-RUN echo "$SECRET" > proxy-secret
-RUN echo "proxy 0.0.0.0:3128;" > proxy.conf
+# Create FINAL config file (secret lives HERE)
+RUN printf "proxy 0.0.0.0:3128 {\\n  secret %s;\\n}\\n" "$SECRET" > proxy.conf
 
 EXPOSE 3128
 
-# IMPORTANT: limit connections to avoid rlimit failure on Koyeb
-CMD ["sh", "-c", "./objs/bin/mtproto-proxy -H 3128 -S $SECRET --aes-pwd proxy-secret -c 1024 proxy.conf"]
+# Start MTProxy (CONFIG FILE ONLY)
+CMD ["sh", "-c", "cd /opt/MTProxy && ./objs/bin/mtproto-proxy -H 3128 -c 1024 proxy.conf"]
