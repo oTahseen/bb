@@ -13,18 +13,13 @@ RUN apt-get update && \
 
 WORKDIR /opt
 
-# Clone official Telegram MTProxy
 RUN git clone https://github.com/TelegramMessenger/MTProxy.git
-
 WORKDIR /opt/MTProxy
-
-# Build
 RUN make
 
-# Create FINAL config file (secret lives HERE)
-RUN printf "proxy 0.0.0.0:3128 {\\n  secret %s;\\n}\\n" "$SECRET" > proxy.conf
+# CORRECT config syntax (NO BRACES)
+RUN printf "proxy 0.0.0.0:3128;\nsecret %s;\n" "$SECRET" > proxy.conf
 
 EXPOSE 3128
 
-# Start MTProxy (CONFIG FILE ONLY)
 CMD ["sh", "-c", "cd /opt/MTProxy && ./objs/bin/mtproto-proxy -H 3128 -c 1024 proxy.conf"]
