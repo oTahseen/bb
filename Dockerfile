@@ -25,4 +25,4 @@ RUN make
 EXPOSE 3128
 
 # Run MTProxy (NO SPONSOR)
-CMD ["sh", "-c", "./objs/bin/mtproto-proxy -H 3128 -S $SECRET --aes-pwd proxy-secret proxy-multi.conf --disable-middle-proxy"]
+CMD ["sh", "-c", "./objs/bin/mtproto-proxy -H 3128 -S $SECRET --aes-pwd proxy-secret proxy-multi.conf"]
