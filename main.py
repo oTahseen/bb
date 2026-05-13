@@ -14,7 +14,8 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    FSInputFile
 )
 
 from aiogram.filters import Command
@@ -22,18 +23,18 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
-# =====================================
+# =========================================
 # LOAD ENV
-# =====================================
+# =========================================
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# =====================================
+# =========================================
 # BOT
-# =====================================
+# =========================================
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -44,9 +45,9 @@ bot = Bot(
 
 dp = Dispatcher()
 
-# =====================================
+# =========================================
 # DATABASE
-# =====================================
+# =========================================
 
 mongo = AsyncIOMotorClient(MONGO_URI)
 
@@ -54,39 +55,16 @@ db = mongo["koyeb_panel"]
 
 users = db["users"]
 
-# =====================================
+# =========================================
 # STATES
-# =====================================
+# =========================================
 
 class AddAccount(StatesGroup):
     waiting_token = State()
-    waiting_name = State()
 
-# =====================================
-# HELPERS
-# =====================================
-
-async def get_user(user_id: int):
-
-    return await users.find_one({
-        "telegram_id": user_id
-    })
-
-async def get_active_account(user_id: int):
-
-    user = await get_user(user_id)
-
-    if not user:
-        return None
-
-    active = user.get("active_account")
-
-    for acc in user.get("accounts", []):
-
-        if acc["id"] == active:
-            return acc
-
-    return None
+# =========================================
+# API REQUEST
+# =========================================
 
 async def koyeb_request(
     token,
@@ -118,11 +96,38 @@ async def koyeb_request(
 
             return response.status, data
 
-# =====================================
-# KEYBOARDS
-# =====================================
+# =========================================
+# DATABASE HELPERS
+# =========================================
 
-start_keyboard = InlineKeyboardMarkup(
+async def get_user(user_id):
+
+    return await users.find_one({
+        "telegram_id": user_id
+    })
+
+async def get_account(
+    telegram_id,
+    account_id
+):
+
+    user = await get_user(telegram_id)
+
+    if not user:
+        return None
+
+    for acc in user.get("accounts", []):
+
+        if acc["id"] == account_id:
+            return acc
+
+    return None
+
+# =========================================
+# KEYBOARDS
+# =========================================
+
+home_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [
             InlineKeyboardButton(
@@ -132,37 +137,43 @@ start_keyboard = InlineKeyboardMarkup(
         ],
         [
             InlineKeyboardButton(
-                text="📦 Manage Accounts",
-                callback_data="manage_accounts"
+                text="📦 Accounts",
+                callback_data="accounts"
             )
         ]
     ]
 )
 
-# =====================================
+# =========================================
 # START
-# =====================================
+# =========================================
 
 @dp.message(Command("start"))
 async def start(message: Message):
 
-    text = """
-<b>Koyeb Control Panel</b>
-
-Manage your Koyeb accounts directly from Telegram.
-"""
-
     await message.answer(
-        text,
-        reply_markup=start_keyboard
+        "<b>Koyeb Telegram Panel</b>",
+        reply_markup=home_keyboard
     )
 
-# =====================================
-# ADD ACCOUNT BUTTON
-# =====================================
+# =========================================
+# HOME
+# =========================================
+
+@dp.callback_query(F.data == "home")
+async def home(callback: CallbackQuery):
+
+    await callback.message.edit_text(
+        "<b>Koyeb Telegram Panel</b>",
+        reply_markup=home_keyboard
+    )
+
+# =========================================
+# ADD ACCOUNT
+# =========================================
 
 @dp.callback_query(F.data == "add_account")
-async def add_account_button(
+async def add_account(
     callback: CallbackQuery,
     state: FSMContext
 ):
@@ -186,55 +197,36 @@ async def save_token(
     status, data = await koyeb_request(
         token,
         "GET",
-        "/apps"
+        "/account"
     )
 
     if status != 200:
 
         return await message.answer(
-            "❌ Invalid token"
+            "❌ Invalid API token"
         )
 
-    await state.update_data(
-        token=token
+    account_name = (
+        data.get("email")
+        or data.get("name")
+        or "Koyeb Account"
     )
-
-    await state.set_state(
-        AddAccount.waiting_name
-    )
-
-    await message.answer(
-        "Now send account name"
-    )
-
-@dp.message(AddAccount.waiting_name)
-async def save_name(
-    message: Message,
-    state: FSMContext
-):
-
-    data = await state.get_data()
-
-    token = data["token"]
-
-    name = message.text.strip()
-
-    account = {
-        "id": str(uuid.uuid4()),
-        "name": name,
-        "token": token
-    }
 
     user = await get_user(
         message.from_user.id
     )
 
+    account = {
+        "id": str(uuid.uuid4()),
+        "token": token,
+        "name": account_name
+    }
+
     if not user:
 
         await users.insert_one({
             "telegram_id": message.from_user.id,
-            "accounts": [account],
-            "active_account": account["id"]
+            "accounts": [account]
         })
 
     else:
@@ -253,18 +245,16 @@ async def save_name(
     await state.clear()
 
     await message.answer(
-        f"✅ Account <b>{name}</b> added",
-        reply_markup=start_keyboard
+        f"✅ Added:\n<b>{account_name}</b>",
+        reply_markup=home_keyboard
     )
 
-# =====================================
-# MANAGE ACCOUNTS
-# =====================================
+# =========================================
+# ACCOUNTS
+# =========================================
 
-@dp.callback_query(F.data == "manage_accounts")
-async def manage_accounts(
-    callback: CallbackQuery
-):
+@dp.callback_query(F.data == "accounts")
+async def accounts(callback: CallbackQuery):
 
     user = await get_user(
         callback.from_user.id
@@ -273,7 +263,8 @@ async def manage_accounts(
     if not user:
 
         return await callback.message.edit_text(
-            "No accounts found"
+            "No accounts found",
+            reply_markup=home_keyboard
         )
 
     keyboard = []
@@ -301,71 +292,47 @@ async def manage_accounts(
         )
     )
 
-# =====================================
+# =========================================
 # ACCOUNT PANEL
-# =====================================
+# =========================================
 
 @dp.callback_query(F.data.startswith("account:"))
 async def account_panel(callback: CallbackQuery):
 
     account_id = callback.data.split(":")[1]
 
-    user = await get_user(
-        callback.from_user.id
+    account = await get_account(
+        callback.from_user.id,
+        account_id
     )
-
-    account = None
-
-    for acc in user["accounts"]:
-
-        if acc["id"] == account_id:
-            account = acc
-            break
 
     if not account:
         return
-
-    await users.update_one(
-        {
-            "telegram_id": callback.from_user.id
-        },
-        {
-            "$set": {
-                "active_account": account_id
-            }
-        }
-    )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="📦 Apps",
-                    callback_data="apps"
+                    callback_data=f"apps:{account_id}"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="⚙ Services",
-                    callback_data="services"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🚀 Deployments",
-                    callback_data="deployments"
+                    callback_data=f"services:{account_id}"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🗑 Delete Account",
-                    callback_data=f"deleteacc:{account_id}"
+                    callback_data=f"delete_account:{account_id}"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="⬅ Back",
-                    callback_data="manage_accounts"
+                    callback_data="accounts"
                 )
             ]
         ]
@@ -376,15 +343,18 @@ async def account_panel(callback: CallbackQuery):
         reply_markup=keyboard
     )
 
-# =====================================
+# =========================================
 # APPS
-# =====================================
+# =========================================
 
-@dp.callback_query(F.data == "apps")
+@dp.callback_query(F.data.startswith("apps:"))
 async def apps(callback: CallbackQuery):
 
-    account = await get_active_account(
-        callback.from_user.id
+    account_id = callback.data.split(":")[1]
+
+    account = await get_account(
+        callback.from_user.id,
+        account_id
     )
 
     token = account["token"]
@@ -397,12 +367,6 @@ async def apps(callback: CallbackQuery):
 
     apps = data.get("apps", [])
 
-    if not apps:
-
-        return await callback.message.edit_text(
-            "No apps found"
-        )
-
     keyboard = []
 
     for app in apps:
@@ -410,14 +374,14 @@ async def apps(callback: CallbackQuery):
         keyboard.append([
             InlineKeyboardButton(
                 text=f"📦 {app['name']}",
-                callback_data=f"app:{app['id']}"
+                callback_data="none"
             )
         ])
 
     keyboard.append([
         InlineKeyboardButton(
             text="⬅ Back",
-            callback_data="manage_accounts"
+            callback_data=f"account:{account_id}"
         )
     ])
 
@@ -428,15 +392,18 @@ async def apps(callback: CallbackQuery):
         )
     )
 
-# =====================================
+# =========================================
 # SERVICES
-# =====================================
+# =========================================
 
-@dp.callback_query(F.data == "services")
+@dp.callback_query(F.data.startswith("services:"))
 async def services(callback: CallbackQuery):
 
-    account = await get_active_account(
-        callback.from_user.id
+    account_id = callback.data.split(":")[1]
+
+    account = await get_account(
+        callback.from_user.id,
+        account_id
     )
 
     token = account["token"]
@@ -449,12 +416,6 @@ async def services(callback: CallbackQuery):
 
     services = data.get("services", [])
 
-    if not services:
-
-        return await callback.message.edit_text(
-            "No services found"
-        )
-
     keyboard = []
 
     for service in services:
@@ -462,14 +423,18 @@ async def services(callback: CallbackQuery):
         keyboard.append([
             InlineKeyboardButton(
                 text=f"⚙ {service['name']}",
-                callback_data=f"service:{service['id']}"
+                callback_data=(
+                    f"service:"
+                    f"{account_id}:"
+                    f"{service['id']}"
+                )
             )
         ])
 
     keyboard.append([
         InlineKeyboardButton(
             text="⬅ Back",
-            callback_data="manage_accounts"
+            callback_data=f"account:{account_id}"
         )
     ])
 
@@ -480,104 +445,79 @@ async def services(callback: CallbackQuery):
         )
     )
 
-# =====================================
+# =========================================
 # SERVICE PANEL
-# =====================================
+# =========================================
 
 @dp.callback_query(F.data.startswith("service:"))
 async def service_panel(callback: CallbackQuery):
 
-    service_id = callback.data.split(":")[1]
+    parts = callback.data.split(":")
+
+    account_id = parts[1]
+    service_id = parts[2]
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔄 Restart",
-                    callback_data=f"restart:{service_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
                     text="🚀 Redeploy",
-                    callback_data=f"redeploy:{service_id}"
+                    callback_data=(
+                        f"redeploy:"
+                        f"{account_id}:"
+                        f"{service_id}"
+                    )
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="📜 Logs",
-                    callback_data=f"logs:{service_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🧪 Variables",
-                    callback_data=f"vars:{service_id}"
+                    callback_data=(
+                        f"logs:"
+                        f"{account_id}:"
+                        f"{service_id}"
+                    )
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🗑 Delete",
-                    callback_data=f"delete_service:{service_id}"
+                    callback_data=(
+                        f"delete_service:"
+                        f"{account_id}:"
+                        f"{service_id}"
+                    )
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="⬅ Back",
-                    callback_data="services"
+                    callback_data=f"services:{account_id}"
                 )
             ]
         ]
     )
 
     await callback.message.edit_text(
-        f"<b>Service:</b>\n<code>{service_id}</code>",
+        f"<b>Service</b>\n<code>{service_id}</code>",
         reply_markup=keyboard
     )
 
-# =====================================
-# RESTART SERVICE
-# =====================================
-
-@dp.callback_query(F.data.startswith("restart:"))
-async def restart_service(callback: CallbackQuery):
-
-    service_id = callback.data.split(":")[1]
-
-    account = await get_active_account(
-        callback.from_user.id
-    )
-
-    token = account["token"]
-
-    status, data = await koyeb_request(
-        token,
-        "POST",
-        f"/services/{service_id}/restart"
-    )
-
-    if status not in [200, 202]:
-
-        return await callback.answer(
-            "Failed",
-            show_alert=True
-        )
-
-    await callback.answer(
-        "Service restarted"
-    )
-
-# =====================================
-# REDEPLOY SERVICE
-# =====================================
+# =========================================
+# REDEPLOY
+# =========================================
 
 @dp.callback_query(F.data.startswith("redeploy:"))
-async def redeploy_service(callback: CallbackQuery):
+async def redeploy(callback: CallbackQuery):
 
-    service_id = callback.data.split(":")[1]
+    parts = callback.data.split(":")
 
-    account = await get_active_account(
-        callback.from_user.id
+    account_id = parts[1]
+    service_id = parts[2]
+
+    account = await get_account(
+        callback.from_user.id,
+        account_id
     )
 
     token = account["token"]
@@ -588,41 +528,107 @@ async def redeploy_service(callback: CallbackQuery):
         f"/services/{service_id}/redeploy"
     )
 
+    print(status)
+    print(data)
+
     if status not in [200, 202]:
 
         return await callback.answer(
-            "Failed",
+            f"Failed: {status}",
             show_alert=True
         )
 
     await callback.answer(
-        "Redeploy triggered"
+        "Redeploy started"
     )
 
-# =====================================
+# =========================================
 # LOGS
-# =====================================
+# =========================================
 
 @dp.callback_query(F.data.startswith("logs:"))
 async def logs(callback: CallbackQuery):
 
-    service_id = callback.data.split(":")[1]
+    parts = callback.data.split(":")
 
-    await callback.message.answer(
-        f"Logs API can be added here for:\n<code>{service_id}</code>"
+    account_id = parts[1]
+    service_id = parts[2]
+
+    account = await get_account(
+        callback.from_user.id,
+        account_id
     )
 
-# =====================================
+    token = account["token"]
+
+    # =====================================
+    # GET DEPLOYMENTS
+    # =====================================
+
+    status, data = await koyeb_request(
+        token,
+        "GET",
+        "/deployments"
+    )
+
+    deployments = data.get(
+        "deployments",
+        []
+    )
+
+    target = None
+
+    for dep in deployments:
+
+        if dep.get("service_id") == service_id:
+            target = dep
+            break
+
+    if not target:
+
+        return await callback.answer(
+            "No deployment found",
+            show_alert=True
+        )
+
+    deployment_id = target["id"]
+
+    # =====================================
+    # GET LOGS
+    # =====================================
+
+    log_status, log_data = await koyeb_request(
+        token,
+        "GET",
+        f"/deployments/{deployment_id}/logs"
+    )
+
+    logs_text = str(log_data)
+
+    filename = f"logs_{service_id}.txt"
+
+    with open(filename, "w") as f:
+        f.write(logs_text)
+
+    await callback.message.answer_document(
+        FSInputFile(filename)
+    )
+
+# =========================================
 # DELETE SERVICE
-# =====================================
+# =========================================
 
 @dp.callback_query(F.data.startswith("delete_service:"))
 async def delete_service(callback: CallbackQuery):
 
-    service_id = callback.data.split(":")[1]
+    parts = callback.data.split(":")
 
-    account = await get_active_account(
-        callback.from_user.id
+    account_id = parts[1]
+    service_id = parts[2]
+
+    account = await get_account(
+        callback.from_user.id,
+        account_id
     )
 
     token = account["token"]
@@ -632,6 +638,9 @@ async def delete_service(callback: CallbackQuery):
         "DELETE",
         f"/services/{service_id}"
     )
+
+    print(status)
+    print(data)
 
     if status not in [200, 202, 204]:
 
@@ -644,11 +653,11 @@ async def delete_service(callback: CallbackQuery):
         "✅ Service deleted"
     )
 
-# =====================================
+# =========================================
 # DELETE ACCOUNT
-# =====================================
+# =========================================
 
-@dp.callback_query(F.data.startswith("deleteacc:"))
+@dp.callback_query(F.data.startswith("delete_account:"))
 async def delete_account(callback: CallbackQuery):
 
     account_id = callback.data.split(":")[1]
@@ -667,24 +676,13 @@ async def delete_account(callback: CallbackQuery):
     )
 
     await callback.message.edit_text(
-        "✅ Account deleted"
+        "✅ Account deleted",
+        reply_markup=home_keyboard
     )
 
-# =====================================
-# HOME BUTTON
-# =====================================
-
-@dp.callback_query(F.data == "home")
-async def home(callback: CallbackQuery):
-
-    await callback.message.edit_text(
-        "<b>Koyeb Control Panel</b>",
-        reply_markup=start_keyboard
-    )
-
-# =====================================
+# =========================================
 # MAIN
-# =====================================
+# =========================================
 
 async def main():
 
