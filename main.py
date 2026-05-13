@@ -37,6 +37,17 @@ mongo = AsyncIOMotorClient(MONGO_URI)
 db    = mongo["koyeb_panel"]
 users = db["users"]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent HTTP session  (created once at startup for speed)
+# ─────────────────────────────────────────────────────────────────────────────
+_http_session: aiohttp.ClientSession | None = None
+
+def get_http_session() -> aiohttp.ClientSession:
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = aiohttp.ClientSession()
+    return _http_session
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FSM
@@ -49,6 +60,10 @@ class AddAccount(StatesGroup):
 class UpdateEnv(StatesGroup):
     waiting_key   = State()
     waiting_value = State()
+
+class RestoreEnv(StatesGroup):
+    waiting_file  = State()   # user uploads the backup JSON
+
 
 class CreateService(StatesGroup):
     waiting_app_id      = State()
@@ -74,15 +89,15 @@ async def koyeb_request(token, method, endpoint, payload=None, params=None):
     }
     url = f"https://app.koyeb.com{endpoint}"
 
-    async with aiohttp.ClientSession() as session:
-        async with session.request(
-            method, url, headers=headers, json=payload, params=params
-        ) as resp:
-            try:
-                data = await resp.json()
-            except Exception:
-                data = await resp.text()
-            return resp.status, data
+    session = get_http_session()
+    async with session.request(
+        method, url, headers=headers, json=payload, params=params
+    ) as resp:
+        try:
+            data = await resp.json()
+        except Exception:
+            data = await resp.text()
+        return resp.status, data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -418,8 +433,12 @@ async def cb_service_panel(callback: CallbackQuery):
                 InlineKeyboardButton(text="📜 Logs",    callback_data=f"logs:{index}"),
             ],
             [
-                InlineKeyboardButton(text="🌐 Env Vars",   callback_data=f"env_view:{index}"),
-                InlineKeyboardButton(text="💾 Backup Env", callback_data=f"env_backup:{index}"),
+                InlineKeyboardButton(text="🌐 Env Vars",    callback_data=f"env_view:{index}"),
+                InlineKeyboardButton(text="💾 Backup Env",  callback_data=f"env_backup:{index}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔄 Restore Env", callback_data=f"env_restore:{index}"),
+                InlineKeyboardButton(text="🏓 Keep-Alive",  callback_data=f"keepalive_menu:{index}"),
             ],
             [InlineKeyboardButton(text="🗑 Delete",     callback_data=f"delete_service:{index}")],
             [InlineKeyboardButton(text="⬅ Back",        callback_data="services")],
@@ -488,6 +507,7 @@ async def cb_env_view(callback: CallbackQuery):
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Add / Update Env", callback_data=f"env_update:{index}")],
             [InlineKeyboardButton(text="💾 Backup Env JSON",  callback_data=f"env_backup:{index}")],
+            [InlineKeyboardButton(text="🔄 Restore Env",      callback_data=f"env_restore:{index}")],
             [InlineKeyboardButton(text="⬅ Back",             callback_data=f"service:{index}")],
         ]
     )
@@ -545,10 +565,197 @@ async def cb_env_backup(callback: CallbackQuery):
         FSInputFile(filename),
         caption=(
             f"💾 Env backup for <b>{svc['name']}</b>\n\n"
-            "You can restore by uploading this file back (feature coming soon) "
-            "or use it to re-create the env vars manually."
+            "To restore, tap <b>🔄 Restore Env</b> in the Env Vars menu and upload this file."
         ),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Restore Env – upload the backup JSON to restore all env vars
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("env_restore:"))
+async def cb_env_restore_start(callback: CallbackQuery, state: FSMContext):
+    index = int(callback.data.split(":")[1])
+    await state.update_data(service_index=index)
+    await state.set_state(RestoreEnv.waiting_file)
+    await callback.message.edit_text(
+        "🔄 <b>Restore Env Vars</b>\n\n"
+        "Send the backup <code>.json</code> file you downloaded earlier.\n"
+        "<i>All existing env vars will be replaced with the ones in the file.</i>"
+    )
+
+
+@dp.message(RestoreEnv.waiting_file)
+async def msg_restore_env_file(message: Message, state: FSMContext):
+    if not message.document:
+        return await message.answer("Please send a JSON file.")
+
+    fsm_data = await state.get_data()
+    index    = fsm_data["service_index"]
+    await state.clear()
+
+    user          = await get_user(message.from_user.id)
+    services_list = user.get("temp_services", [])
+    account_index = user.get("temp_account_index")
+    token         = user["accounts"][account_index]["token"]
+    svc           = services_list[index]
+
+    # Download the file
+    file_info = await bot.get_file(message.document.file_id)
+    file_bytes = await bot.download_file(file_info.file_path)
+    try:
+        backup = json.loads(file_bytes.read())
+    except Exception:
+        return await message.answer("❌ Could not parse the file. Make sure it's a valid JSON backup.")
+
+    env_vars = backup.get("env", [])
+    if not isinstance(env_vars, list):
+        return await message.answer("❌ Invalid backup format — 'env' key missing or not a list.")
+
+    await message.answer(f"⏳ Restoring {len(env_vars)} env var(s)...")
+
+    # Fetch current deployment definition and replace env
+    deployment, definition = await get_deployment_definition(token, svc)
+    if definition is None:
+        return await message.answer("❌ Could not fetch current deployment definition.")
+
+    definition["env"] = env_vars
+    payload = {"definition": definition, "save_only": True}
+
+    status, data = await koyeb_request(token, "PUT", f"/v1/services/{svc['id']}", payload=payload)
+
+    if status not in (200, 201, 202):
+        err = data.get("message", str(data)) if isinstance(data, dict) else str(data)
+        return await message.answer(f"❌ Restore failed (HTTP {status}): {err}")
+
+    back_kbd = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Redeploy Now",   callback_data=f"redeploy:{index}")],
+        [InlineKeyboardButton(text="⬅ Back to Service", callback_data=f"service:{index}")],
+    ])
+    await message.answer(
+        f"✅ <b>Env vars restored!</b> ({len(env_vars)} variable(s))\n\n"
+        "<i>Tap <b>Redeploy Now</b> when you're ready to apply the restored env vars.</i>",
+        reply_markup=back_kbd,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Keep-Alive Pinger – pings a URL every 3 minutes to prevent cold starts
+# ─────────────────────────────────────────────────────────────────────────────
+
+# In-memory dict: { telegram_id: asyncio.Task }
+_keepalive_tasks: dict[int, asyncio.Task] = {}
+
+
+async def _ping_loop(user_id: int, url: str):
+    """Background loop: ping url every 3 minutes."""
+    session = get_http_session()
+    while True:
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                pass  # fire and forget, just keep the service warm
+        except Exception:
+            pass  # silently ignore network errors
+        await asyncio.sleep(180)  # 3 minutes
+
+
+def _start_keepalive(user_id: int, url: str):
+    _stop_keepalive(user_id)
+    task = asyncio.create_task(_ping_loop(user_id, url))
+    _keepalive_tasks[user_id] = task
+
+
+def _stop_keepalive(user_id: int):
+    task = _keepalive_tasks.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+@dp.callback_query(F.data.startswith("keepalive_menu:"))
+async def cb_keepalive_menu(callback: CallbackQuery):
+    index = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    is_active = user_id in _keepalive_tasks
+
+    # Check if URL is stored in DB
+    user = await get_user(user_id)
+    ka_url = user.get("keepalive_url", "")
+
+    status_text = (
+        f"✅ <b>Active</b> — pinging every 3 min\n🔗 <code>{ka_url}</code>"
+        if is_active else "⏹ <b>Inactive</b>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔴 Stop Pinger" if is_active else "🟢 Start Pinger",
+            callback_data=f"keepalive_toggle:{index}",
+        )],
+        [InlineKeyboardButton(text="✏️ Set URL", callback_data=f"keepalive_seturl:{index}")],
+        [InlineKeyboardButton(text="⬅ Back", callback_data=f"service:{index}")],
+    ])
+
+    await callback.message.edit_text(
+        f"<b>🏓 Keep-Alive Pinger</b>\n\nStatus: {status_text}\n\n"
+        "<i>When active, the bot pings your service URL every 3 minutes to prevent cold starts.</i>",
+        reply_markup=keyboard,
+    )
+
+
+@dp.callback_query(F.data.startswith("keepalive_toggle:"))
+async def cb_keepalive_toggle(callback: CallbackQuery):
+    index   = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    if user_id in _keepalive_tasks:
+        _stop_keepalive(user_id)
+        await callback.answer("⏹ Keep-alive stopped.", show_alert=False)
+    else:
+        user   = await get_user(user_id)
+        ka_url = user.get("keepalive_url", "")
+        if not ka_url:
+            return await callback.answer(
+                "❌ No URL set. Tap '✏️ Set URL' first.", show_alert=True
+            )
+        _start_keepalive(user_id, ka_url)
+        await callback.answer("🟢 Keep-alive started!", show_alert=False)
+
+    # Refresh the menu
+    await cb_keepalive_menu(callback)
+
+
+@dp.callback_query(F.data.startswith("keepalive_seturl:"))
+async def cb_keepalive_seturl(callback: CallbackQuery):
+    index      = int(callback.data.split(":")[1])
+    svc, token = await get_service_and_token(callback, index)
+
+    # Auto-resolve URL from service's app domains — same logic as service panel
+    url = ""
+    app_id = svc.get("app_id")
+    if app_id:
+        app_status, app_data = await koyeb_request(token, "GET", f"/v1/apps/{app_id}")
+        if app_status == 200:
+            domains = app_data.get("app", {}).get("domains", [])
+            if domains:
+                first_domain = domains[0].get("name", "")
+                if first_domain:
+                    url = f"https://{first_domain}"
+
+    if not url:
+        return await callback.answer(
+            "❌ No domain found for this service. Set URL manually via the menu.",
+            show_alert=True,
+        )
+
+    await users.update_one(
+        {"telegram_id": callback.from_user.id},
+        {"$set": {"keepalive_url": url}},
+    )
+
+    await callback.answer(f"✅ URL set to {url}", show_alert=False)
+    # Refresh the keep-alive menu to reflect new URL
+    await cb_keepalive_menu(callback)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -624,10 +831,10 @@ async def msg_env_value(message: Message, state: FSMContext):
 
     definition["env"] = env_vars
 
-    # PATCH /v1/services/{id}  with full updated definition
+    # save_only=True — save without auto-redeploying; user can redeploy when ready
     payload = {
         "definition": definition,
-        "save_only":  False,  # trigger a redeploy so the new env takes effect
+        "save_only":  True,
     }
     status, data = await koyeb_request(
         token, "PUT", f"/v1/services/{svc['id']}", payload=payload
@@ -637,11 +844,12 @@ async def msg_env_value(message: Message, state: FSMContext):
         err = data.get("message", str(data)) if isinstance(data, dict) else str(data)
         return await message.answer(f"❌ Update failed (HTTP {status}): {err}")
 
-    back_kbd = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="⬅ Back to Service", callback_data=f"service:{index}")
-    ]])
+    back_kbd = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Redeploy Now",      callback_data=f"redeploy:{index}")],
+        [InlineKeyboardButton(text="⬅ Back to Service",    callback_data=f"service:{index}")],
+    ])
     await message.answer(
-        f"{action}\n\n<i>A new deployment has been triggered to apply the changes.</i>",
+        f"{action}\n\n<i>Env var saved. Tap <b>Redeploy Now</b> when you're ready to apply changes.</i>",
         reply_markup=back_kbd,
     )
 
@@ -1093,7 +1301,17 @@ async def msg_create_env(message: Message, state: FSMContext):
 
 async def main():
     print("Bot started")
-    await dp.start_polling(bot)
+    # Pre-create the shared HTTP session so first request is instant
+    get_http_session()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # Clean up keep-alive tasks
+        for task in list(_keepalive_tasks.values()):
+            task.cancel()
+        # Close shared HTTP session
+        if _http_session and not _http_session.closed:
+            await _http_session.close()
 
 
 if __name__ == "__main__":
