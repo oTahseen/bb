@@ -52,8 +52,11 @@ async def koyeb_request(
     payload=None
 ):
 
+    if not token.startswith("Bearer "):
+        token = f"Bearer {token}"
+
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": token,
         "Content-Type": "application/json"
     }
 
@@ -404,9 +407,6 @@ async def services(callback: CallbackQuery):
         "/services"
     )
 
-    print(status)
-    print(data)
-
     services = data.get(
         "services",
         []
@@ -569,9 +569,6 @@ async def redeploy(callback: CallbackQuery):
         f"/services/{service['id']}/redeploy"
     )
 
-    print(status)
-    print(data)
-
     if status not in [200, 202]:
 
         return await callback.answer(
@@ -601,9 +598,6 @@ async def pause_service(callback: CallbackQuery):
         f"/services/{service['id']}/pause"
     )
 
-    print(status)
-    print(data)
-
     if status not in [200, 202]:
 
         return await callback.answer(
@@ -632,9 +626,6 @@ async def resume_service(callback: CallbackQuery):
         "POST",
         f"/services/{service['id']}/resume"
     )
-
-    print(status)
-    print(data)
 
     if status not in [200, 202]:
 
@@ -681,9 +672,6 @@ async def logs(callback: CallbackQuery):
         payload
     )
 
-    print(status)
-    print(data)
-
     filename = (
         f"{service['name']}.txt"
     )
@@ -713,9 +701,6 @@ async def delete_service(callback: CallbackQuery):
         "DELETE",
         f"/services/{service['id']}"
     )
-
-    print(status)
-    print(data)
 
     if status not in [200, 202, 204]:
 
