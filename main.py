@@ -97,7 +97,7 @@ async def koyeb_request(
             return response.status, data
 
 # =========================================
-# DATABASE HELPERS
+# HELPERS
 # =========================================
 
 async def get_user(user_id):
@@ -194,33 +194,72 @@ async def save_token(
 
     token = message.text.strip()
 
+    # =====================================
+    # VALIDATE TOKEN
+    # =====================================
+
     status, data = await koyeb_request(
         token,
         "GET",
-        "/account"
+        "/apps"
     )
+
+    print(status)
+    print(data)
 
     if status != 200:
 
         return await message.answer(
-            "❌ Invalid API token"
+            f"❌ Invalid API token\n\n"
+            f"{data}"
         )
 
-    account_name = (
-        data.get("email")
-        or data.get("name")
-        or "Koyeb Account"
-    )
+    # =====================================
+    # AUTO ACCOUNT NAME
+    # =====================================
+
+    apps = data.get("apps", [])
+
+    if apps:
+
+        first_app = apps[0]
+
+        account_name = (
+            first_app.get("organization_name")
+            or first_app.get("name")
+            or "Koyeb Account"
+        )
+
+    else:
+        account_name = "Koyeb Account"
 
     user = await get_user(
         message.from_user.id
     )
+
+    # =====================================
+    # PREVENT DUPLICATES
+    # =====================================
+
+    if user:
+
+        for acc in user.get("accounts", []):
+
+            if acc["token"] == token:
+
+                return await message.answer(
+                    "⚠ Account already added"
+                )
 
     account = {
         "id": str(uuid.uuid4()),
         "token": token,
         "name": account_name
     }
+
+    # =====================================
+    # SAVE
+    # =====================================
 
     if not user:
 
@@ -365,6 +404,9 @@ async def apps(callback: CallbackQuery):
         "/apps"
     )
 
+    print(status)
+    print(data)
+
     apps = data.get("apps", [])
 
     keyboard = []
@@ -413,6 +455,9 @@ async def services(callback: CallbackQuery):
         "GET",
         "/services"
     )
+
+    print(status)
+    print(data)
 
     services = data.get("services", [])
 
@@ -534,12 +579,12 @@ async def redeploy(callback: CallbackQuery):
     if status not in [200, 202]:
 
         return await callback.answer(
-            f"Failed: {status}",
+            f"Failed ({status})",
             show_alert=True
         )
 
     await callback.answer(
-        "Redeploy started"
+        "🚀 Redeploy started"
     )
 
 # =========================================
@@ -570,6 +615,9 @@ async def logs(callback: CallbackQuery):
         "GET",
         "/deployments"
     )
+
+    print(status)
+    print(data)
 
     deployments = data.get(
         "deployments",
@@ -603,12 +651,14 @@ async def logs(callback: CallbackQuery):
         f"/deployments/{deployment_id}/logs"
     )
 
-    logs_text = str(log_data)
+    print(log_status)
+    print(log_data)
 
     filename = f"logs_{service_id}.txt"
 
     with open(filename, "w") as f:
-        f.write(logs_text)
+
+        f.write(str(log_data))
 
     await callback.message.answer_document(
         FSInputFile(filename)
@@ -645,7 +695,7 @@ async def delete_service(callback: CallbackQuery):
     if status not in [200, 202, 204]:
 
         return await callback.answer(
-            "Delete failed",
+            f"Delete failed ({status})",
             show_alert=True
         )
 
