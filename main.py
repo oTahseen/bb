@@ -3,32 +3,37 @@ import uuid
 import aiohttp
 import asyncio
 
-from datetime import datetime
 from dotenv import load_dotenv
-
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from aiogram import Bot, Dispatcher
-from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
+
+from aiogram.filters import Command
 
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
-# =========================================
+# =====================================
 # LOAD ENV
-# =========================================
+# =====================================
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# =========================================
+# =====================================
 # BOT
-# =========================================
+# =====================================
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -39,27 +44,27 @@ bot = Bot(
 
 dp = Dispatcher()
 
-# =========================================
+# =====================================
 # DATABASE
-# =========================================
+# =====================================
 
 mongo = AsyncIOMotorClient(MONGO_URI)
 
-db = mongo["koyeb_manager"]
+db = mongo["koyeb_panel"]
 
 users = db["users"]
 
-# =========================================
-# FSM STATES
-# =========================================
+# =====================================
+# STATES
+# =====================================
 
 class AddAccount(StatesGroup):
     waiting_token = State()
     waiting_name = State()
 
-# =========================================
+# =====================================
 # HELPERS
-# =========================================
+# =====================================
 
 async def get_user(user_id: int):
 
@@ -74,19 +79,20 @@ async def get_active_account(user_id: int):
     if not user:
         return None
 
-    active_id = user.get("active_account")
+    active = user.get("active_account")
 
-    for account in user.get("accounts", []):
+    for acc in user.get("accounts", []):
 
-        if account["id"] == active_id:
-            return account
+        if acc["id"] == active:
+            return acc
 
     return None
 
 async def koyeb_request(
-    token: str,
-    method: str,
-    endpoint: str
+    token,
+    method,
+    endpoint,
+    payload=None
 ):
 
     headers = {
@@ -101,7 +107,8 @@ async def koyeb_request(
         async with session.request(
             method,
             url,
-            headers=headers
+            headers=headers,
+            json=payload
         ) as response:
 
             try:
@@ -111,49 +118,68 @@ async def koyeb_request(
 
             return response.status, data
 
-# =========================================
+# =====================================
+# KEYBOARDS
+# =====================================
+
+start_keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="➕ Add Account",
+                callback_data="add_account"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📦 Manage Accounts",
+                callback_data="manage_accounts"
+            )
+        ]
+    ]
+)
+
+# =====================================
 # START
-# =========================================
+# =====================================
 
 @dp.message(Command("start"))
 async def start(message: Message):
 
     text = """
-<b>Koyeb Multi Account Manager</b>
+<b>Koyeb Control Panel</b>
 
-Account Commands:
-
-/addaccount
-/accounts
-/use ACCOUNT_NUMBER
-/delete ACCOUNT_NUMBER
-
-Koyeb Commands:
-
-/apps
-/services
-/deployments
-/restart SERVICE_ID
-/redeploy SERVICE_ID
+Manage your Koyeb accounts directly from Telegram.
 """
 
-    await message.answer(text)
-
-# =========================================
-# ADD ACCOUNT
-# =========================================
-
-@dp.message(Command("addaccount"))
-async def add_account(message: Message, state: FSMContext):
-
-    await state.set_state(AddAccount.waiting_token)
-
     await message.answer(
+        text,
+        reply_markup=start_keyboard
+    )
+
+# =====================================
+# ADD ACCOUNT BUTTON
+# =====================================
+
+@dp.callback_query(F.data == "add_account")
+async def add_account_button(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await state.set_state(
+        AddAccount.waiting_token
+    )
+
+    await callback.message.edit_text(
         "Send your Koyeb API token"
     )
 
 @dp.message(AddAccount.waiting_token)
-async def save_token(message: Message, state: FSMContext):
+async def save_token(
+    message: Message,
+    state: FSMContext
+):
 
     token = message.text.strip()
 
@@ -166,7 +192,7 @@ async def save_token(message: Message, state: FSMContext):
     if status != 200:
 
         return await message.answer(
-            "❌ Invalid Koyeb API token"
+            "❌ Invalid token"
         )
 
     await state.update_data(
@@ -182,24 +208,26 @@ async def save_token(message: Message, state: FSMContext):
     )
 
 @dp.message(AddAccount.waiting_name)
-async def save_account(message: Message, state: FSMContext):
-
-    name = message.text.strip()
+async def save_name(
+    message: Message,
+    state: FSMContext
+):
 
     data = await state.get_data()
 
     token = data["token"]
 
-    user = await get_user(
-        message.from_user.id
-    )
+    name = message.text.strip()
 
     account = {
         "id": str(uuid.uuid4()),
         "name": name,
-        "token": token,
-        "created_at": datetime.utcnow().isoformat()
+        "token": token
     }
+
+    user = await get_user(
+        message.from_user.id
+    )
 
     if not user:
 
@@ -225,175 +253,139 @@ async def save_account(message: Message, state: FSMContext):
     await state.clear()
 
     await message.answer(
-        f"✅ Account <b>{name}</b> added"
+        f"✅ Account <b>{name}</b> added",
+        reply_markup=start_keyboard
     )
 
-# =========================================
-# ACCOUNTS
-# =========================================
+# =====================================
+# MANAGE ACCOUNTS
+# =====================================
 
-@dp.message(Command("accounts"))
-async def accounts(message: Message):
+@dp.callback_query(F.data == "manage_accounts")
+async def manage_accounts(
+    callback: CallbackQuery
+):
 
     user = await get_user(
-        message.from_user.id
+        callback.from_user.id
     )
 
     if not user:
 
-        return await message.answer(
+        return await callback.message.edit_text(
             "No accounts found"
         )
 
-    text = "<b>Your Accounts</b>\n\n"
+    keyboard = []
 
-    for i, acc in enumerate(
-        user["accounts"],
-        start=1
-    ):
+    for acc in user["accounts"]:
 
-        active = ""
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"📁 {acc['name']}",
+                callback_data=f"account:{acc['id']}"
+            )
+        ])
 
-        if acc["id"] == user.get(
-            "active_account"
-        ):
-            active = " ✅ ACTIVE"
-
-        text += (
-            f"{i}. {acc['name']}"
-            f"{active}\n"
+    keyboard.append([
+        InlineKeyboardButton(
+            text="⬅ Back",
+            callback_data="home"
         )
+    ])
 
-    await message.answer(text)
-
-# =========================================
-# SWITCH ACCOUNT
-# =========================================
-
-@dp.message(Command("use"))
-async def use_account(message: Message):
-
-    args = message.text.split()
-
-    if len(args) < 2:
-
-        return await message.answer(
-            "Usage:\n/use 1"
+    await callback.message.edit_text(
+        "<b>Your Accounts</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=keyboard
         )
-
-    try:
-        number = int(args[1])
-    except:
-        return await message.answer(
-            "Invalid number"
-        )
-
-    user = await get_user(
-        message.from_user.id
     )
 
-    if not user:
+# =====================================
+# ACCOUNT PANEL
+# =====================================
+
+@dp.callback_query(F.data.startswith("account:"))
+async def account_panel(callback: CallbackQuery):
+
+    account_id = callback.data.split(":")[1]
+
+    user = await get_user(
+        callback.from_user.id
+    )
+
+    account = None
+
+    for acc in user["accounts"]:
+
+        if acc["id"] == account_id:
+            account = acc
+            break
+
+    if not account:
         return
-
-    accounts = user["accounts"]
-
-    if number < 1 or number > len(accounts):
-
-        return await message.answer(
-            "Invalid account number"
-        )
-
-    selected = accounts[number - 1]
 
     await users.update_one(
         {
-            "telegram_id": message.from_user.id
+            "telegram_id": callback.from_user.id
         },
         {
             "$set": {
-                "active_account": selected["id"]
+                "active_account": account_id
             }
         }
     )
 
-    await message.answer(
-        f"✅ Active account:\n"
-        f"<b>{selected['name']}</b>"
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📦 Apps",
+                    callback_data="apps"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⚙ Services",
+                    callback_data="services"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚀 Deployments",
+                    callback_data="deployments"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Delete Account",
+                    callback_data=f"deleteacc:{account_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅ Back",
+                    callback_data="manage_accounts"
+                )
+            ]
+        ]
     )
 
-# =========================================
-# DELETE ACCOUNT
-# =========================================
-
-@dp.message(Command("delete"))
-async def delete_account(message: Message):
-
-    args = message.text.split()
-
-    if len(args) < 2:
-
-        return await message.answer(
-            "Usage:\n/delete 1"
-        )
-
-    try:
-        number = int(args[1])
-    except:
-        return await message.answer(
-            "Invalid number"
-        )
-
-    user = await get_user(
-        message.from_user.id
+    await callback.message.edit_text(
+        f"<b>{account['name']}</b>",
+        reply_markup=keyboard
     )
 
-    if not user:
-        return
-
-    accounts = user["accounts"]
-
-    if number < 1 or number > len(accounts):
-
-        return await message.answer(
-            "Invalid account number"
-        )
-
-    selected = accounts[number - 1]
-
-    await users.update_one(
-        {
-            "telegram_id": message.from_user.id
-        },
-        {
-            "$pull": {
-                "accounts": {
-                    "id": selected["id"]
-                }
-            }
-        }
-    )
-
-    await message.answer(
-        f"🗑 Deleted:\n"
-        f"<b>{selected['name']}</b>"
-    )
-
-# =========================================
+# =====================================
 # APPS
-# =========================================
+# =====================================
 
-@dp.message(Command("apps"))
-async def apps(message: Message):
+@dp.callback_query(F.data == "apps")
+async def apps(callback: CallbackQuery):
 
     account = await get_active_account(
-        message.from_user.id
+        callback.from_user.id
     )
-
-    if not account:
-
-        return await message.answer(
-            "No active account"
-        )
 
     token = account["token"]
 
@@ -403,48 +395,49 @@ async def apps(message: Message):
         "/apps"
     )
 
-    if status != 200:
-
-        return await message.answer(
-            "API error"
-        )
-
     apps = data.get("apps", [])
 
     if not apps:
 
-        return await message.answer(
+        return await callback.message.edit_text(
             "No apps found"
         )
 
-    text = "<b>Apps</b>\n\n"
+    keyboard = []
 
     for app in apps:
 
-        text += (
-            f"<b>{app['name']}</b>\n"
-            f"ID: <code>{app['id']}</code>\n"
-            f"Status: {app.get('status')}\n\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"📦 {app['name']}",
+                callback_data=f"app:{app['id']}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text="⬅ Back",
+            callback_data="manage_accounts"
         )
+    ])
 
-    await message.answer(text)
-
-# =========================================
-# SERVICES
-# =========================================
-
-@dp.message(Command("services"))
-async def services(message: Message):
-
-    account = await get_active_account(
-        message.from_user.id
+    await callback.message.edit_text(
+        "<b>Apps</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=keyboard
+        )
     )
 
-    if not account:
+# =====================================
+# SERVICES
+# =====================================
 
-        return await message.answer(
-            "No active account"
-        )
+@dp.callback_query(F.data == "services")
+async def services(callback: CallbackQuery):
+
+    account = await get_active_account(
+        callback.from_user.id
+    )
 
     token = account["token"]
 
@@ -454,110 +447,106 @@ async def services(message: Message):
         "/services"
     )
 
-    if status != 200:
-
-        return await message.answer(
-            "API error"
-        )
-
     services = data.get("services", [])
 
     if not services:
 
-        return await message.answer(
+        return await callback.message.edit_text(
             "No services found"
         )
 
-    text = "<b>Services</b>\n\n"
+    keyboard = []
 
     for service in services:
 
-        text += (
-            f"<b>{service['name']}</b>\n"
-            f"ID: <code>{service['id']}</code>\n"
-            f"Type: {service.get('type')}\n"
-            f"Status: {service.get('status')}\n\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"⚙ {service['name']}",
+                callback_data=f"service:{service['id']}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text="⬅ Back",
+            callback_data="manage_accounts"
         )
+    ])
 
-    await message.answer(text)
+    await callback.message.edit_text(
+        "<b>Services</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=keyboard
+        )
+    )
 
-# =========================================
-# DEPLOYMENTS
-# =========================================
+# =====================================
+# SERVICE PANEL
+# =====================================
 
-@dp.message(Command("deployments"))
-async def deployments(message: Message):
+@dp.callback_query(F.data.startswith("service:"))
+async def service_panel(callback: CallbackQuery):
+
+    service_id = callback.data.split(":")[1]
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Restart",
+                    callback_data=f"restart:{service_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚀 Redeploy",
+                    callback_data=f"redeploy:{service_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📜 Logs",
+                    callback_data=f"logs:{service_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧪 Variables",
+                    callback_data=f"vars:{service_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Delete",
+                    callback_data=f"delete_service:{service_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅ Back",
+                    callback_data="services"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.edit_text(
+        f"<b>Service:</b>\n<code>{service_id}</code>",
+        reply_markup=keyboard
+    )
+
+# =====================================
+# RESTART SERVICE
+# =====================================
+
+@dp.callback_query(F.data.startswith("restart:"))
+async def restart_service(callback: CallbackQuery):
+
+    service_id = callback.data.split(":")[1]
 
     account = await get_active_account(
-        message.from_user.id
+        callback.from_user.id
     )
-
-    if not account:
-
-        return await message.answer(
-            "No active account"
-        )
-
-    token = account["token"]
-
-    status, data = await koyeb_request(
-        token,
-        "GET",
-        "/deployments"
-    )
-
-    if status != 200:
-
-        return await message.answer(
-            "API error"
-        )
-
-    deployments = data.get(
-        "deployments",
-        []
-    )
-
-    if not deployments:
-
-        return await message.answer(
-            "No deployments found"
-        )
-
-    text = "<b>Deployments</b>\n\n"
-
-    for dep in deployments[:10]:
-
-        text += (
-            f"ID: <code>{dep['id']}</code>\n"
-            f"Status: {dep.get('status')}\n"
-            f"Created: {dep.get('created_at')}\n\n"
-        )
-
-    await message.answer(text)
-
-# =========================================
-# RESTART
-# =========================================
-
-@dp.message(Command("restart"))
-async def restart(message: Message):
-
-    args = message.text.split()
-
-    if len(args) < 2:
-
-        return await message.answer(
-            "Usage:\n/restart SERVICE_ID"
-        )
-
-    service_id = args[1]
-
-    account = await get_active_account(
-        message.from_user.id
-    )
-
-    if not account:
-        return
 
     token = account["token"]
 
@@ -569,37 +558,27 @@ async def restart(message: Message):
 
     if status not in [200, 202]:
 
-        return await message.answer(
-            f"Failed:\n{data}"
+        return await callback.answer(
+            "Failed",
+            show_alert=True
         )
 
-    await message.answer(
-        "✅ Restart triggered"
+    await callback.answer(
+        "Service restarted"
     )
 
-# =========================================
-# REDEPLOY
-# =========================================
+# =====================================
+# REDEPLOY SERVICE
+# =====================================
 
-@dp.message(Command("redeploy"))
-async def redeploy(message: Message):
+@dp.callback_query(F.data.startswith("redeploy:"))
+async def redeploy_service(callback: CallbackQuery):
 
-    args = message.text.split()
-
-    if len(args) < 2:
-
-        return await message.answer(
-            "Usage:\n/redeploy SERVICE_ID"
-        )
-
-    service_id = args[1]
+    service_id = callback.data.split(":")[1]
 
     account = await get_active_account(
-        message.from_user.id
+        callback.from_user.id
     )
-
-    if not account:
-        return
 
     token = account["token"]
 
@@ -611,17 +590,101 @@ async def redeploy(message: Message):
 
     if status not in [200, 202]:
 
-        return await message.answer(
-            f"Failed:\n{data}"
+        return await callback.answer(
+            "Failed",
+            show_alert=True
         )
 
-    await message.answer(
-        "🚀 Redeploy triggered"
+    await callback.answer(
+        "Redeploy triggered"
     )
 
-# =========================================
+# =====================================
+# LOGS
+# =====================================
+
+@dp.callback_query(F.data.startswith("logs:"))
+async def logs(callback: CallbackQuery):
+
+    service_id = callback.data.split(":")[1]
+
+    await callback.message.answer(
+        f"Logs API can be added here for:\n<code>{service_id}</code>"
+    )
+
+# =====================================
+# DELETE SERVICE
+# =====================================
+
+@dp.callback_query(F.data.startswith("delete_service:"))
+async def delete_service(callback: CallbackQuery):
+
+    service_id = callback.data.split(":")[1]
+
+    account = await get_active_account(
+        callback.from_user.id
+    )
+
+    token = account["token"]
+
+    status, data = await koyeb_request(
+        token,
+        "DELETE",
+        f"/services/{service_id}"
+    )
+
+    if status not in [200, 202, 204]:
+
+        return await callback.answer(
+            "Delete failed",
+            show_alert=True
+        )
+
+    await callback.message.edit_text(
+        "✅ Service deleted"
+    )
+
+# =====================================
+# DELETE ACCOUNT
+# =====================================
+
+@dp.callback_query(F.data.startswith("deleteacc:"))
+async def delete_account(callback: CallbackQuery):
+
+    account_id = callback.data.split(":")[1]
+
+    await users.update_one(
+        {
+            "telegram_id": callback.from_user.id
+        },
+        {
+            "$pull": {
+                "accounts": {
+                    "id": account_id
+                }
+            }
+        }
+    )
+
+    await callback.message.edit_text(
+        "✅ Account deleted"
+    )
+
+# =====================================
+# HOME BUTTON
+# =====================================
+
+@dp.callback_query(F.data == "home")
+async def home(callback: CallbackQuery):
+
+    await callback.message.edit_text(
+        "<b>Koyeb Control Panel</b>",
+        reply_markup=start_keyboard
+    )
+
+# =====================================
 # MAIN
-# =========================================
+# =====================================
 
 async def main():
 
