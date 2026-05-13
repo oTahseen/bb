@@ -53,7 +53,7 @@ async def koyeb_request(
 ):
 
     headers = {
-        "Authorization": token,
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
@@ -148,7 +148,7 @@ async def save_token(
     if status != 200:
 
         return await message.answer(
-            f"❌ Invalid API token\n\n{data}"
+            f"❌ Invalid API Token\n\n{data}"
         )
 
     organizations = data.get(
@@ -158,13 +158,15 @@ async def save_token(
 
     if organizations:
 
-        organization_name = organizations[0].get(
+        org = organizations[0]
+
+        account_name = org.get(
             "name",
             "Koyeb Account"
         )
 
     else:
-        organization_name = "Koyeb Account"
+        account_name = "Koyeb Account"
 
     user = await get_user(
         message.from_user.id
@@ -172,7 +174,10 @@ async def save_token(
 
     if user:
 
-        for acc in user.get("accounts", []):
+        for acc in user.get(
+            "accounts",
+            []
+        ):
 
             if acc["token"] == token:
 
@@ -183,7 +188,7 @@ async def save_token(
     account = {
         "id": str(uuid.uuid4()),
         "token": token,
-        "name": organization_name
+        "name": account_name
     }
 
     if not user:
@@ -209,7 +214,7 @@ async def save_token(
     await state.clear()
 
     await message.answer(
-        f"✅ Added\n\n<b>{organization_name}</b>",
+        f"✅ Added\n\n<b>{account_name}</b>",
         reply_markup=home_keyboard
     )
 
@@ -343,7 +348,10 @@ async def apps(callback: CallbackQuery):
         "/apps"
     )
 
-    apps = data.get("apps", [])
+    apps = data.get(
+        "apps",
+        []
+    )
 
     keyboard = []
 
@@ -351,7 +359,10 @@ async def apps(callback: CallbackQuery):
 
         keyboard.append([
             InlineKeyboardButton(
-                text=f"📦 {app['name']}",
+                text=(
+                    f"📦 {app['name']} "
+                    f"({app.get('status')})"
+                ),
                 callback_data="none"
             )
         ])
@@ -392,6 +403,9 @@ async def services(callback: CallbackQuery):
         "GET",
         "/services"
     )
+
+    print(status)
+    print(data)
 
     services = data.get(
         "services",
@@ -466,9 +480,17 @@ async def service_panel(callback: CallbackQuery):
                 InlineKeyboardButton(
                     text="🚀 Redeploy",
                     callback_data=f"redeploy:{index}"
+                ),
+                InlineKeyboardButton(
+                    text="⏸ Pause",
+                    callback_data=f"pause:{index}"
                 )
             ],
             [
+                InlineKeyboardButton(
+                    text="▶ Resume",
+                    callback_data=f"resume:{index}"
+                ),
                 InlineKeyboardButton(
                     text="📜 Logs",
                     callback_data=f"logs:{index}"
@@ -501,12 +523,10 @@ async def service_panel(callback: CallbackQuery):
         reply_markup=keyboard
     )
 
-@dp.callback_query(F.data.startswith("redeploy:"))
-async def redeploy(callback: CallbackQuery):
-
-    index = int(
-        callback.data.split(":")[1]
-    )
+async def get_service_and_token(
+    callback,
+    index
+):
 
     user = await get_user(
         callback.from_user.id
@@ -521,12 +541,7 @@ async def redeploy(callback: CallbackQuery):
         "temp_account_index"
     )
 
-    if index >= len(services):
-        return
-
     service = services[index]
-
-    service_id = service["id"]
 
     account = user["accounts"][
         account_index
@@ -534,10 +549,24 @@ async def redeploy(callback: CallbackQuery):
 
     token = account["token"]
 
+    return service, token
+
+@dp.callback_query(F.data.startswith("redeploy:"))
+async def redeploy(callback: CallbackQuery):
+
+    index = int(
+        callback.data.split(":")[1]
+    )
+
+    service, token = await get_service_and_token(
+        callback,
+        index
+    )
+
     status, data = await koyeb_request(
         token,
         "POST",
-        f"/services/{service_id}/redeploy"
+        f"/services/{service['id']}/redeploy"
     )
 
     print(status)
@@ -554,6 +583,70 @@ async def redeploy(callback: CallbackQuery):
         "🚀 Redeploy started"
     )
 
+@dp.callback_query(F.data.startswith("pause:"))
+async def pause_service(callback: CallbackQuery):
+
+    index = int(
+        callback.data.split(":")[1]
+    )
+
+    service, token = await get_service_and_token(
+        callback,
+        index
+    )
+
+    status, data = await koyeb_request(
+        token,
+        "POST",
+        f"/services/{service['id']}/pause"
+    )
+
+    print(status)
+    print(data)
+
+    if status not in [200, 202]:
+
+        return await callback.answer(
+            "Pause failed",
+            show_alert=True
+        )
+
+    await callback.answer(
+        "⏸ Service paused"
+    )
+
+@dp.callback_query(F.data.startswith("resume:"))
+async def resume_service(callback: CallbackQuery):
+
+    index = int(
+        callback.data.split(":")[1]
+    )
+
+    service, token = await get_service_and_token(
+        callback,
+        index
+    )
+
+    status, data = await koyeb_request(
+        token,
+        "POST",
+        f"/services/{service['id']}/resume"
+    )
+
+    print(status)
+    print(data)
+
+    if status not in [200, 202]:
+
+        return await callback.answer(
+            "Resume failed",
+            show_alert=True
+        )
+
+    await callback.answer(
+        "▶ Service resumed"
+    )
+
 @dp.callback_query(F.data.startswith("logs:"))
 async def logs(callback: CallbackQuery):
 
@@ -561,68 +654,35 @@ async def logs(callback: CallbackQuery):
         callback.data.split(":")[1]
     )
 
-    user = await get_user(
-        callback.from_user.id
+    service, token = await get_service_and_token(
+        callback,
+        index
     )
 
-    services = user.get(
-        "temp_services",
-        []
+    deployment_id = service.get(
+        "latest_deployment_id"
     )
 
-    account_index = user.get(
-        "temp_account_index"
-    )
-
-    if index >= len(services):
-        return
-
-    service = services[index]
-
-    service_id = service["id"]
-
-    account = user["accounts"][
-        account_index
-    ]
-
-    token = account["token"]
-
-    status, data = await koyeb_request(
-        token,
-        "GET",
-        "/deployments"
-    )
-
-    deployments = data.get(
-        "deployments",
-        []
-    )
-
-    target = None
-
-    for dep in deployments:
-
-        if dep.get(
-            "service_id"
-        ) == service_id:
-
-            target = dep
-            break
-
-    if not target:
+    if not deployment_id:
 
         return await callback.answer(
             "No deployment found",
             show_alert=True
         )
 
-    deployment_id = target["id"]
+    payload = {
+        "deployment_id": deployment_id
+    }
 
-    log_status, log_data = await koyeb_request(
+    status, data = await koyeb_request(
         token,
-        "GET",
-        f"/deployments/{deployment_id}/logs"
+        "POST",
+        "/streams/logs/query",
+        payload
     )
+
+    print(status)
+    print(data)
 
     filename = (
         f"{service['name']}.txt"
@@ -630,7 +690,7 @@ async def logs(callback: CallbackQuery):
 
     with open(filename, "w") as f:
 
-        f.write(str(log_data))
+        f.write(str(data))
 
     await callback.message.answer_document(
         FSInputFile(filename)
@@ -643,37 +703,19 @@ async def delete_service(callback: CallbackQuery):
         callback.data.split(":")[1]
     )
 
-    user = await get_user(
-        callback.from_user.id
+    service, token = await get_service_and_token(
+        callback,
+        index
     )
-
-    services = user.get(
-        "temp_services",
-        []
-    )
-
-    account_index = user.get(
-        "temp_account_index"
-    )
-
-    if index >= len(services):
-        return
-
-    service = services[index]
-
-    service_id = service["id"]
-
-    account = user["accounts"][
-        account_index
-    ]
-
-    token = account["token"]
 
     status, data = await koyeb_request(
         token,
         "DELETE",
-        f"/services/{service_id}"
+        f"/services/{service['id']}"
     )
+
+    print(status)
+    print(data)
 
     if status not in [200, 202, 204]:
 
