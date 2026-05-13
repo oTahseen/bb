@@ -847,7 +847,48 @@ async def msg_env_edit_value(message: Message, state: FSMContext):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Redeploy  –  POST /v1/services/{id}/redeploy
+# Shared log fetcher used by both build-logs and runtime-logs
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _fetch_logs(token: str, params: dict) -> list[str]:
+    """Fetch log lines from /v1/streams/logs/query. Returns list of formatted lines."""
+    status, data = await koyeb_request(token, "GET", "/v1/streams/logs/query", params=params)
+    if status != 200:
+        return []
+    entries = data.get("data", []) if isinstance(data, dict) else []
+    lines = []
+    for entry in entries:
+        ts     = entry.get("created_at", "")[:19].replace("T", " ")  # trim to seconds
+        labels = entry.get("labels", {})
+        stream = labels.get("stream", "") if isinstance(labels, dict) else ""
+        msg    = entry.get("msg", "")
+        lines.append(f"[{ts}] [{stream}] {msg}" if ts else msg)
+    lines.reverse()
+    return lines
+
+
+def _log_keyboard(refresh_cb: str, file_cb: str, back_cb: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Refresh", callback_data=refresh_cb),
+            InlineKeyboardButton(text="📁 File",    callback_data=file_cb),
+        ],
+        [InlineKeyboardButton(text="⬅ Back", callback_data=back_cb)],
+    ])
+
+
+def _format_log_preview(lines: list[str], max_chars: int = 3500) -> str:
+    """Return last N lines that fit in a Telegram message."""
+    if not lines:
+        return "<i>No log entries found.</i>"
+    block = "\n".join(lines)
+    if len(block) > max_chars:
+        block = "…\n" + block[-max_chars:]
+    return f"<pre>{block}</pre>"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redeploy  –  POST /v1/services/{id}/redeploy  → show live build logs
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dp.callback_query(F.data.startswith("redeploy:"))
@@ -855,20 +896,110 @@ async def cb_redeploy(callback: CallbackQuery):
     index      = int(callback.data.split(":")[1])
     svc, token = await get_service_and_token(callback, index)
 
+    await callback.answer()
+
     status, data = await koyeb_request(
-        token,
-        "POST",
-        f"/v1/services/{svc['id']}/redeploy",
-        payload={},
+        token, "POST", f"/v1/services/{svc['id']}/redeploy", payload={},
     )
 
     if status not in (200, 201, 202):
-        return await callback.answer(
+        return await callback.message.answer(
             f"❌ Redeploy failed (HTTP {status}): {data.get('message', '') if isinstance(data, dict) else data}",
-            show_alert=True,
         )
 
-    await callback.answer("🚀 Redeploy triggered!", show_alert=False)
+    # Give Koyeb a moment to register the new deployment, then fetch its ID
+    await asyncio.sleep(2)
+    dep_status, dep_data = await koyeb_request(
+        token, "GET", "/v1/deployments",
+        params={"service_id": svc["id"], "limit": "1"},
+    )
+    deployment_id = None
+    if dep_status == 200:
+        deps = dep_data.get("deployments", [])
+        if deps:
+            deployment_id = deps[0].get("id")
+
+    # Store deployment_id so refresh button can re-use it
+    await users.update_one(
+        {"telegram_id": callback.from_user.id},
+        {"$set": {"temp_build_deployment_id": deployment_id}},
+    )
+
+    # Fetch initial build logs
+    params = {
+        "deployment_id": deployment_id or "",
+        "type":  "build",
+        "order": "asc",
+        "limit": "200",
+    }
+    lines = await _fetch_logs(token, params) if deployment_id else []
+    preview = _format_log_preview(lines)
+
+    kbd = _log_keyboard(
+        refresh_cb=f"build_logs_refresh:{index}",
+        file_cb=f"build_logs_file:{index}",
+        back_cb=f"service:{index}",
+    )
+    await callback.message.answer(
+        f"🚀 <b>Redeploying {svc['name']}</b>\n\n<b>Build Logs</b> (deployment: <code>{deployment_id or 'pending…'}</code>)\n\n{preview}",
+        reply_markup=kbd,
+        disable_web_page_preview=True,
+    )
+
+
+@dp.callback_query(F.data.startswith("build_logs_refresh:"))
+async def cb_build_logs_refresh(callback: CallbackQuery):
+    index      = int(callback.data.split(":")[1])
+    svc, token = await get_service_and_token(callback, index)
+    user       = await get_user(callback.from_user.id)
+    deployment_id = user.get("temp_build_deployment_id")
+
+    await callback.answer("🔄 Refreshing…", show_alert=False)
+
+    params = {
+        "deployment_id": deployment_id or "",
+        "type":  "build",
+        "order": "asc",
+        "limit": "200",
+    }
+    lines   = await _fetch_logs(token, params) if deployment_id else []
+    preview = _format_log_preview(lines)
+
+    kbd = _log_keyboard(
+        refresh_cb=f"build_logs_refresh:{index}",
+        file_cb=f"build_logs_file:{index}",
+        back_cb=f"service:{index}",
+    )
+    await callback.message.edit_text(
+        f"🚀 <b>Build Logs — {svc['name']}</b>\n<code>{deployment_id or '?'}</code>\n\n{preview}",
+        reply_markup=kbd,
+        disable_web_page_preview=True,
+    )
+
+
+@dp.callback_query(F.data.startswith("build_logs_file:"))
+async def cb_build_logs_file(callback: CallbackQuery):
+    index      = int(callback.data.split(":")[1])
+    svc, token = await get_service_and_token(callback, index)
+    user       = await get_user(callback.from_user.id)
+    deployment_id = user.get("temp_build_deployment_id")
+
+    await callback.answer()
+
+    params = {
+        "deployment_id": deployment_id or "",
+        "type":  "build",
+        "order": "asc",
+        "limit": "1000",
+    }
+    lines    = await _fetch_logs(token, params) if deployment_id else []
+    filename = f"{svc['name']}_build_logs.txt"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) if lines else "No build logs found.")
+    await callback.message.answer_document(
+        FSInputFile(filename),
+        caption=f"📁 Build logs for <b>{svc['name']}</b>",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -921,7 +1052,7 @@ async def cb_resume(callback: CallbackQuery):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Logs  –  GET /v1/streams/logs/query
+# Runtime Logs  –  inline preview + Refresh / File buttons
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dp.callback_query(F.data.startswith("logs:"))
@@ -929,45 +1060,77 @@ async def cb_logs(callback: CallbackQuery):
     index      = int(callback.data.split(":")[1])
     svc, token = await get_service_and_token(callback, index)
 
+    await callback.answer()
+
     params = {
         "service_id": svc["id"],
-        "type":       "runtime",
-        "order":      "desc",
-        "limit":      "100",
+        "type":  "runtime",
+        "order": "asc",
+        "limit": "200",
     }
+    lines   = await _fetch_logs(token, params)
+    preview = _format_log_preview(lines)
 
-    status, data = await koyeb_request(
-        token, "GET", "/v1/streams/logs/query", params=params
+    kbd = _log_keyboard(
+        refresh_cb=f"runtime_logs_refresh:{index}",
+        file_cb=f"runtime_logs_file:{index}",
+        back_cb=f"service:{index}",
+    )
+    await callback.message.answer(
+        f"📜 <b>Runtime Logs — {svc['name']}</b>\n\n{preview}",
+        reply_markup=kbd,
+        disable_web_page_preview=True,
     )
 
-    if status != 200:
-        return await callback.answer(
-            f"❌ Failed to fetch logs (HTTP {status}): {data.get('message', '') if isinstance(data, dict) else data}",
-            show_alert=True,
-        )
 
-    log_entries = data.get("data", []) if isinstance(data, dict) else []
+@dp.callback_query(F.data.startswith("runtime_logs_refresh:"))
+async def cb_runtime_logs_refresh(callback: CallbackQuery):
+    index      = int(callback.data.split(":")[1])
+    svc, token = await get_service_and_token(callback, index)
 
-    if not log_entries:
-        return await callback.answer("No logs found for this service.", show_alert=True)
+    await callback.answer("🔄 Refreshing…", show_alert=False)
 
-    lines = []
-    for entry in log_entries:
-        ts     = entry.get("created_at", "")
-        labels = entry.get("labels", {})
-        stream = labels.get("stream", "") if isinstance(labels, dict) else ""
-        msg    = entry.get("msg", "")
-        lines.append(f"[{ts}] [{stream}] {msg}" if ts else msg)
+    params = {
+        "service_id": svc["id"],
+        "type":  "runtime",
+        "order": "asc",
+        "limit": "200",
+    }
+    lines   = await _fetch_logs(token, params)
+    preview = _format_log_preview(lines)
 
-    lines.reverse()
+    kbd = _log_keyboard(
+        refresh_cb=f"runtime_logs_refresh:{index}",
+        file_cb=f"runtime_logs_file:{index}",
+        back_cb=f"service:{index}",
+    )
+    await callback.message.edit_text(
+        f"📜 <b>Runtime Logs — {svc['name']}</b>\n\n{preview}",
+        reply_markup=kbd,
+        disable_web_page_preview=True,
+    )
 
-    filename = f"{svc['name']}_logs.txt"
+
+@dp.callback_query(F.data.startswith("runtime_logs_file:"))
+async def cb_runtime_logs_file(callback: CallbackQuery):
+    index      = int(callback.data.split(":")[1])
+    svc, token = await get_service_and_token(callback, index)
+
+    await callback.answer()
+
+    params = {
+        "service_id": svc["id"],
+        "type":  "runtime",
+        "order": "asc",
+        "limit": "1000",
+    }
+    lines    = await _fetch_logs(token, params)
+    filename = f"{svc['name']}_runtime_logs.txt"
     with open(filename, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
+        f.write("\n".join(lines) if lines else "No runtime logs found.")
     await callback.message.answer_document(
         FSInputFile(filename),
-        caption=f"📜 Logs for <b>{svc['name']}</b>",
+        caption=f"📁 Runtime logs for <b>{svc['name']}</b>",
     )
 
 
