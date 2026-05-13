@@ -210,24 +210,16 @@ async def save_token(
     if status != 200:
 
         return await message.answer(
-            f"❌ Invalid API token\n\n"
-            f"{data}"
+            f"❌ Invalid API token\n\n{data}"
         )
-
-    # =====================================
-    # AUTO ACCOUNT NAME
-    # =====================================
 
     apps = data.get("apps", [])
 
     if apps:
 
-        first_app = apps[0]
-
-        account_name = (
-            first_app.get("organization_name")
-            or first_app.get("name")
-            or "Koyeb Account"
+        account_name = apps[0].get(
+            "name",
+            "Koyeb Account"
         )
 
     else:
@@ -308,12 +300,14 @@ async def accounts(callback: CallbackQuery):
 
     keyboard = []
 
-    for acc in user["accounts"]:
+    for i, acc in enumerate(
+        user["accounts"]
+    ):
 
         keyboard.append([
             InlineKeyboardButton(
                 text=f"📁 {acc['name']}",
-                callback_data=f"account:{acc['id']}"
+                callback_data=f"account:{i}"
             )
         ])
 
@@ -338,34 +332,54 @@ async def accounts(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("account:"))
 async def account_panel(callback: CallbackQuery):
 
-    account_id = callback.data.split(":")[1]
-
-    account = await get_account(
-        callback.from_user.id,
-        account_id
+    index = int(
+        callback.data.split(":")[1]
     )
 
-    if not account:
+    user = await get_user(
+        callback.from_user.id
+    )
+
+    accounts = user.get(
+        "accounts",
+        []
+    )
+
+    if index >= len(accounts):
         return
+
+    account = accounts[index]
+
+    # SAVE ACTIVE ACCOUNT TEMP
+    await users.update_one(
+        {
+            "telegram_id": callback.from_user.id
+        },
+        {
+            "$set": {
+                "temp_account_index": index
+            }
+        }
+    )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="📦 Apps",
-                    callback_data=f"apps:{account_id}"
+                    callback_data="apps"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="⚙ Services",
-                    callback_data=f"services:{account_id}"
+                    callback_data="services"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🗑 Delete Account",
-                    callback_data=f"delete_account:{account_id}"
+                    callback_data=f"delete_account:{index}"
                 )
             ],
             [
@@ -386,15 +400,20 @@ async def account_panel(callback: CallbackQuery):
 # APPS
 # =========================================
 
-@dp.callback_query(F.data.startswith("apps:"))
+@dp.callback_query(F.data == "apps")
 async def apps(callback: CallbackQuery):
 
-    account_id = callback.data.split(":")[1]
-
-    account = await get_account(
-        callback.from_user.id,
-        account_id
+    user = await get_user(
+        callback.from_user.id
     )
+
+    account_index = user.get(
+        "temp_account_index"
+    )
+
+    account = user["accounts"][
+        account_index
+    ]
 
     token = account["token"]
 
@@ -423,7 +442,7 @@ async def apps(callback: CallbackQuery):
     keyboard.append([
         InlineKeyboardButton(
             text="⬅ Back",
-            callback_data=f"account:{account_id}"
+            callback_data=f"account:{account_index}"
         )
     ])
 
@@ -438,15 +457,20 @@ async def apps(callback: CallbackQuery):
 # SERVICES
 # =========================================
 
-@dp.callback_query(F.data.startswith("services:"))
+@dp.callback_query(F.data == "services")
 async def services(callback: CallbackQuery):
 
-    account_id = callback.data.split(":")[1]
-
-    account = await get_account(
-        callback.from_user.id,
-        account_id
+    user = await get_user(
+        callback.from_user.id
     )
+
+    account_index = user.get(
+        "temp_account_index"
+    )
+
+    account = user["accounts"][
+        account_index
+    ]
 
     token = account["token"]
 
@@ -459,27 +483,43 @@ async def services(callback: CallbackQuery):
     print(status)
     print(data)
 
-    services = data.get("services", [])
+    services = data.get(
+        "services",
+        []
+    )
+
+    # SAVE TEMP SERVICES
+    await users.update_one(
+        {
+            "telegram_id": callback.from_user.id
+        },
+        {
+            "$set": {
+                "temp_services": services
+            }
+        }
+    )
 
     keyboard = []
 
-    for service in services:
+    for i, service in enumerate(
+        services
+    ):
 
         keyboard.append([
             InlineKeyboardButton(
-                text=f"⚙ {service['name']}",
-                callback_data=(
-                    f"service:"
-                    f"{account_id}:"
-                    f"{service['id']}"
-                )
+                text=(
+                    f"⚙ {service['name']} "
+                    f"({service.get('status')})"
+                ),
+                callback_data=f"service:{i}"
             )
         ])
 
     keyboard.append([
         InlineKeyboardButton(
             text="⬅ Back",
-            callback_data=f"account:{account_id}"
+            callback_data=f"account:{account_index}"
         )
     ])
 
@@ -497,54 +537,62 @@ async def services(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("service:"))
 async def service_panel(callback: CallbackQuery):
 
-    parts = callback.data.split(":")
+    index = int(
+        callback.data.split(":")[1]
+    )
 
-    account_id = parts[1]
-    service_id = parts[2]
+    user = await get_user(
+        callback.from_user.id
+    )
+
+    services = user.get(
+        "temp_services",
+        []
+    )
+
+    if index >= len(services):
+        return
+
+    service = services[index]
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="🚀 Redeploy",
-                    callback_data=(
-                        f"redeploy:"
-                        f"{account_id}:"
-                        f"{service_id}"
-                    )
+                    callback_data=f"redeploy:{index}"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="📜 Logs",
-                    callback_data=(
-                        f"logs:"
-                        f"{account_id}:"
-                        f"{service_id}"
-                    )
+                    callback_data=f"logs:{index}"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🗑 Delete",
-                    callback_data=(
-                        f"delete_service:"
-                        f"{account_id}:"
-                        f"{service_id}"
-                    )
+                    callback_data=f"delete:{index}"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="⬅ Back",
-                    callback_data=f"services:{account_id}"
+                    callback_data="services"
                 )
             ]
         ]
     )
 
+    text = (
+        f"<b>{service['name']}</b>\n\n"
+        f"Status: {service.get('status')}\n"
+        f"Type: {service.get('type')}\n"
+        f"ID:\n<code>{service['id']}</code>"
+    )
+
     await callback.message.edit_text(
-        f"<b>Service</b>\n<code>{service_id}</code>",
+        text,
         reply_markup=keyboard
     )
 
@@ -555,15 +603,33 @@ async def service_panel(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("redeploy:"))
 async def redeploy(callback: CallbackQuery):
 
-    parts = callback.data.split(":")
-
-    account_id = parts[1]
-    service_id = parts[2]
-
-    account = await get_account(
-        callback.from_user.id,
-        account_id
+    index = int(
+        callback.data.split(":")[1]
     )
+
+    user = await get_user(
+        callback.from_user.id
+    )
+
+    services = user.get(
+        "temp_services",
+        []
+    )
+
+    account_index = user.get(
+        "temp_account_index"
+    )
+
+    if index >= len(services):
+        return
+
+    service = services[index]
+
+    service_id = service["id"]
+
+    account = user["accounts"][
+        account_index
+    ]
 
     token = account["token"]
 
@@ -594,15 +660,33 @@ async def redeploy(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("logs:"))
 async def logs(callback: CallbackQuery):
 
-    parts = callback.data.split(":")
-
-    account_id = parts[1]
-    service_id = parts[2]
-
-    account = await get_account(
-        callback.from_user.id,
-        account_id
+    index = int(
+        callback.data.split(":")[1]
     )
+
+    user = await get_user(
+        callback.from_user.id
+    )
+
+    services = user.get(
+        "temp_services",
+        []
+    )
+
+    account_index = user.get(
+        "temp_account_index"
+    )
+
+    if index >= len(services):
+        return
+
+    service = services[index]
+
+    service_id = service["id"]
+
+    account = user["accounts"][
+        account_index
+    ]
 
     token = account["token"]
 
@@ -628,7 +712,10 @@ async def logs(callback: CallbackQuery):
 
     for dep in deployments:
 
-        if dep.get("service_id") == service_id:
+        if dep.get(
+            "service_id"
+        ) == service_id:
+
             target = dep
             break
 
@@ -654,7 +741,9 @@ async def logs(callback: CallbackQuery):
     print(log_status)
     print(log_data)
 
-    filename = f"logs_{service_id}.txt"
+    filename = (
+        f"{service['name']}.txt"
+    )
 
     with open(filename, "w") as f:
 
@@ -668,18 +757,36 @@ async def logs(callback: CallbackQuery):
 # DELETE SERVICE
 # =========================================
 
-@dp.callback_query(F.data.startswith("delete_service:"))
+@dp.callback_query(F.data.startswith("delete:"))
 async def delete_service(callback: CallbackQuery):
 
-    parts = callback.data.split(":")
-
-    account_id = parts[1]
-    service_id = parts[2]
-
-    account = await get_account(
-        callback.from_user.id,
-        account_id
+    index = int(
+        callback.data.split(":")[1]
     )
+
+    user = await get_user(
+        callback.from_user.id
+    )
+
+    services = user.get(
+        "temp_services",
+        []
+    )
+
+    account_index = user.get(
+        "temp_account_index"
+    )
+
+    if index >= len(services):
+        return
+
+    service = services[index]
+
+    service_id = service["id"]
+
+    account = user["accounts"][
+        account_index
+    ]
 
     token = account["token"]
 
@@ -695,7 +802,7 @@ async def delete_service(callback: CallbackQuery):
     if status not in [200, 202, 204]:
 
         return await callback.answer(
-            f"Delete failed ({status})",
+            "Delete failed",
             show_alert=True
         )
 
@@ -707,10 +814,32 @@ async def delete_service(callback: CallbackQuery):
 # DELETE ACCOUNT
 # =========================================
 
-@dp.callback_query(F.data.startswith("delete_account:"))
-async def delete_account(callback: CallbackQuery):
+@dp.callback_query(
+    F.data.startswith(
+        "delete_account:"
+    )
+)
+async def delete_account(
+    callback: CallbackQuery
+):
 
-    account_id = callback.data.split(":")[1]
+    index = int(
+        callback.data.split(":")[1]
+    )
+
+    user = await get_user(
+        callback.from_user.id
+    )
+
+    accounts = user.get(
+        "accounts",
+        []
+    )
+
+    if index >= len(accounts):
+        return
+
+    account = accounts[index]
 
     await users.update_one(
         {
@@ -719,7 +848,7 @@ async def delete_account(callback: CallbackQuery):
         {
             "$pull": {
                 "accounts": {
-                    "id": account_id
+                    "id": account["id"]
                 }
             }
         }
