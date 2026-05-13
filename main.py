@@ -19,22 +19,13 @@ from aiogram.types import (
 )
 
 from aiogram.filters import Command
-
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-
-# =========================================
-# LOAD ENV
-# =========================================
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-
-# =========================================
-# BOT
-# =========================================
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -45,26 +36,14 @@ bot = Bot(
 
 dp = Dispatcher()
 
-# =========================================
-# DATABASE
-# =========================================
-
 mongo = AsyncIOMotorClient(MONGO_URI)
 
 db = mongo["koyeb_panel"]
 
 users = db["users"]
 
-# =========================================
-# STATES
-# =========================================
-
 class AddAccount(StatesGroup):
     waiting_token = State()
-
-# =========================================
-# API REQUEST
-# =========================================
 
 async def koyeb_request(
     token,
@@ -74,7 +53,7 @@ async def koyeb_request(
 ):
 
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": token,
         "Content-Type": "application/json"
     }
 
@@ -96,36 +75,11 @@ async def koyeb_request(
 
             return response.status, data
 
-# =========================================
-# HELPERS
-# =========================================
-
 async def get_user(user_id):
 
     return await users.find_one({
         "telegram_id": user_id
     })
-
-async def get_account(
-    telegram_id,
-    account_id
-):
-
-    user = await get_user(telegram_id)
-
-    if not user:
-        return None
-
-    for acc in user.get("accounts", []):
-
-        if acc["id"] == account_id:
-            return acc
-
-    return None
-
-# =========================================
-# KEYBOARDS
-# =========================================
 
 home_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
@@ -144,10 +98,6 @@ home_keyboard = InlineKeyboardMarkup(
     ]
 )
 
-# =========================================
-# START
-# =========================================
-
 @dp.message(Command("start"))
 async def start(message: Message):
 
@@ -156,10 +106,6 @@ async def start(message: Message):
         reply_markup=home_keyboard
     )
 
-# =========================================
-# HOME
-# =========================================
-
 @dp.callback_query(F.data == "home")
 async def home(callback: CallbackQuery):
 
@@ -167,10 +113,6 @@ async def home(callback: CallbackQuery):
         "<b>Koyeb Telegram Panel</b>",
         reply_markup=home_keyboard
     )
-
-# =========================================
-# ADD ACCOUNT
-# =========================================
 
 @dp.callback_query(F.data == "add_account")
 async def add_account(
@@ -194,14 +136,10 @@ async def save_token(
 
     token = message.text.strip()
 
-    # =====================================
-    # VALIDATE TOKEN
-    # =====================================
-
     status, data = await koyeb_request(
         token,
         "GET",
-        "/apps"
+        "/account/organizations"
     )
 
     print(status)
@@ -213,25 +151,24 @@ async def save_token(
             f"❌ Invalid API token\n\n{data}"
         )
 
-    apps = data.get("apps", [])
+    organizations = data.get(
+        "organizations",
+        []
+    )
 
-    if apps:
+    if organizations:
 
-        account_name = apps[0].get(
+        organization_name = organizations[0].get(
             "name",
             "Koyeb Account"
         )
 
     else:
-        account_name = "Koyeb Account"
+        organization_name = "Koyeb Account"
 
     user = await get_user(
         message.from_user.id
     )
-
-    # =====================================
-    # PREVENT DUPLICATES
-    # =====================================
 
     if user:
 
@@ -246,12 +183,8 @@ async def save_token(
     account = {
         "id": str(uuid.uuid4()),
         "token": token,
-        "name": account_name
+        "name": organization_name
     }
-
-    # =====================================
-    # SAVE
-    # =====================================
 
     if not user:
 
@@ -276,13 +209,9 @@ async def save_token(
     await state.clear()
 
     await message.answer(
-        f"✅ Added:\n<b>{account_name}</b>",
+        f"✅ Added\n\n<b>{organization_name}</b>",
         reply_markup=home_keyboard
     )
-
-# =========================================
-# ACCOUNTS
-# =========================================
 
 @dp.callback_query(F.data == "accounts")
 async def accounts(callback: CallbackQuery):
@@ -325,10 +254,6 @@ async def accounts(callback: CallbackQuery):
         )
     )
 
-# =========================================
-# ACCOUNT PANEL
-# =========================================
-
 @dp.callback_query(F.data.startswith("account:"))
 async def account_panel(callback: CallbackQuery):
 
@@ -350,7 +275,6 @@ async def account_panel(callback: CallbackQuery):
 
     account = accounts[index]
 
-    # SAVE ACTIVE ACCOUNT TEMP
     await users.update_one(
         {
             "telegram_id": callback.from_user.id
@@ -396,10 +320,6 @@ async def account_panel(callback: CallbackQuery):
         reply_markup=keyboard
     )
 
-# =========================================
-# APPS
-# =========================================
-
 @dp.callback_query(F.data == "apps")
 async def apps(callback: CallbackQuery):
 
@@ -422,9 +342,6 @@ async def apps(callback: CallbackQuery):
         "GET",
         "/apps"
     )
-
-    print(status)
-    print(data)
 
     apps = data.get("apps", [])
 
@@ -453,10 +370,6 @@ async def apps(callback: CallbackQuery):
         )
     )
 
-# =========================================
-# SERVICES
-# =========================================
-
 @dp.callback_query(F.data == "services")
 async def services(callback: CallbackQuery):
 
@@ -480,15 +393,11 @@ async def services(callback: CallbackQuery):
         "/services"
     )
 
-    print(status)
-    print(data)
-
     services = data.get(
         "services",
         []
     )
 
-    # SAVE TEMP SERVICES
     await users.update_one(
         {
             "telegram_id": callback.from_user.id
@@ -529,10 +438,6 @@ async def services(callback: CallbackQuery):
             inline_keyboard=keyboard
         )
     )
-
-# =========================================
-# SERVICE PANEL
-# =========================================
 
 @dp.callback_query(F.data.startswith("service:"))
 async def service_panel(callback: CallbackQuery):
@@ -596,10 +501,6 @@ async def service_panel(callback: CallbackQuery):
         reply_markup=keyboard
     )
 
-# =========================================
-# REDEPLOY
-# =========================================
-
 @dp.callback_query(F.data.startswith("redeploy:"))
 async def redeploy(callback: CallbackQuery):
 
@@ -653,10 +554,6 @@ async def redeploy(callback: CallbackQuery):
         "🚀 Redeploy started"
     )
 
-# =========================================
-# LOGS
-# =========================================
-
 @dp.callback_query(F.data.startswith("logs:"))
 async def logs(callback: CallbackQuery):
 
@@ -690,18 +587,11 @@ async def logs(callback: CallbackQuery):
 
     token = account["token"]
 
-    # =====================================
-    # GET DEPLOYMENTS
-    # =====================================
-
     status, data = await koyeb_request(
         token,
         "GET",
         "/deployments"
     )
-
-    print(status)
-    print(data)
 
     deployments = data.get(
         "deployments",
@@ -728,18 +618,11 @@ async def logs(callback: CallbackQuery):
 
     deployment_id = target["id"]
 
-    # =====================================
-    # GET LOGS
-    # =====================================
-
     log_status, log_data = await koyeb_request(
         token,
         "GET",
         f"/deployments/{deployment_id}/logs"
     )
-
-    print(log_status)
-    print(log_data)
 
     filename = (
         f"{service['name']}.txt"
@@ -752,10 +635,6 @@ async def logs(callback: CallbackQuery):
     await callback.message.answer_document(
         FSInputFile(filename)
     )
-
-# =========================================
-# DELETE SERVICE
-# =========================================
 
 @dp.callback_query(F.data.startswith("delete:"))
 async def delete_service(callback: CallbackQuery):
@@ -796,9 +675,6 @@ async def delete_service(callback: CallbackQuery):
         f"/services/{service_id}"
     )
 
-    print(status)
-    print(data)
-
     if status not in [200, 202, 204]:
 
         return await callback.answer(
@@ -809,10 +685,6 @@ async def delete_service(callback: CallbackQuery):
     await callback.message.edit_text(
         "✅ Service deleted"
     )
-
-# =========================================
-# DELETE ACCOUNT
-# =========================================
 
 @dp.callback_query(
     F.data.startswith(
@@ -858,10 +730,6 @@ async def delete_account(
         "✅ Account deleted",
         reply_markup=home_keyboard
     )
-
-# =========================================
-# MAIN
-# =========================================
 
 async def main():
 
